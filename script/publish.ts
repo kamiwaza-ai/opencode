@@ -88,9 +88,12 @@ for (const file of pkgjsons) {
 }
 
 const extensionToml = new URL("../packages/extensions/zed/extension.toml", import.meta.url).pathname
-let toml = await Bun.file(extensionToml).text()
-toml = toml.replace(/^version = "[^"]+"/m, `version = "${Script.version}"`)
-toml = toml.replaceAll(/releases\/download\/v[^/]+\//g, `releases/download/v${Script.version}/`)
+const tomlText = await Bun.file(extensionToml).text()
+const distBase = `https://dist.kamiwaza.ai/opencode/releases/v${Script.version}/`
+const toml = tomlText
+  .replace(/^version = "[^"]+"/m, `version = "${Script.version}"`)
+  .replace(/https:\/\/github.com\/sst\/opencode\/releases\/download\/v[^/]+\//g, distBase)
+  .replace(/https:\/\/dist\.kamiwaza\.ai\/opencode\/releases\/v[^/]+\//g, distBase)
 console.log("updated:", extensionToml)
 await Bun.file(extensionToml).write(toml)
 

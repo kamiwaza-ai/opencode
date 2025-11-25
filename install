@@ -25,6 +25,8 @@ elif [[ "$arch" == "x86_64" ]]; then
   arch="x64"
 fi
 
+DIST_BASE=${OPENCODE_DIST_BASE:-https://dist.kamiwaza.ai/opencode/releases}
+
 if [ "$os" = "linux" ]; then
     filename="$APP-$os-$arch.tar.gz"
 else
@@ -63,17 +65,26 @@ fi
 INSTALL_DIR=$HOME/.opencode/bin
 mkdir -p "$INSTALL_DIR"
 
-if [ -z "$requested_version" ]; then
-    url="https://github.com/sst/opencode/releases/latest/download/$filename"
-    specific_version=$(curl -s https://api.github.com/repos/sst/opencode/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+specific_version=$requested_version
 
-    if [[ $? -ne 0 || -z "$specific_version" ]]; then
-        echo -e "${RED}Failed to fetch version information${NC}"
-        exit 1
-    fi
-else
-    url="https://github.com/sst/opencode/releases/download/v${requested_version}/$filename"
-    specific_version=$requested_version
+if [ -z "$specific_version" ]; then
+    specific_version=$(curl -fsSL "$DIST_BASE/latest/version" 2>/dev/null || true)
+    specific_version=$(echo "$specific_version" | tr -d ' \r\n')
+fi
+
+if [ -z "$specific_version" ]; then
+    specific_version=$(curl -s https://api.github.com/repos/sst/opencode/releases/latest 2>/dev/null | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' || true)
+    specific_version=$(echo "$specific_version" | tr -d ' \r\n')
+fi
+
+if [ -z "$specific_version" ]; then
+    echo -e "${RED}Failed to fetch version information${NC}"
+    exit 1
+fi
+
+url="$DIST_BASE/v${specific_version}/$filename"
+if [ -z "$requested_version" ]; then
+    url="$DIST_BASE/latest/$filename"
 fi
 
 print_message() {
@@ -322,4 +333,3 @@ echo -e ""
 echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/docs"
 echo -e ""
 echo -e ""
-
