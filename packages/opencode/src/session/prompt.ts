@@ -16,6 +16,7 @@ import {
   type Tool as AITool,
   tool,
   wrapLanguageModel,
+  simulateStreamingMiddleware,
   stepCountIs,
   jsonSchema,
 } from "ai"
@@ -48,6 +49,7 @@ import { fn } from "@/util/fn"
 import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { SessionStatus } from "./status"
+import { Flag } from "../flag/flag"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -498,6 +500,25 @@ export namespace SessionPrompt {
         },
       )
 
+      const streaming = Flag.streamingEnabled()
+      const middleware = [
+        ...(streaming ? [] : [simulateStreamingMiddleware()]),
+        {
+          async transformParams(args) {
+            if (args.type === "stream") {
+              // @ts-expect-error
+              args.params.prompt = ProviderTransform.message(args.params.prompt, model.providerID, model.modelID)
+            }
+            return args.params
+          },
+        },
+      ]
+      const providerOptions = ProviderTransform.providerOptions(
+        model.npm,
+        model.providerID,
+        streaming ? params.options : { ...params.options, stream: false },
+      )
+
       if (step === 1) {
         SessionSummary.summarize({
           sessionID: sessionID,
@@ -552,7 +573,7 @@ export namespace SessionPrompt {
             OUTPUT_TOKEN_MAX,
           ),
           abortSignal: abort,
-          providerOptions: ProviderTransform.providerOptions(model.npm, model.providerID, params.options),
+          providerOptions,
           stopWhen: stepCountIs(1),
           temperature: params.temperature,
           topP: params.topP,
@@ -582,17 +603,7 @@ export namespace SessionPrompt {
           tools: model.info.tool_call === false ? undefined : tools,
           model: wrapLanguageModel({
             model: model.language,
-            middleware: [
-              {
-                async transformParams(args) {
-                  if (args.type === "stream") {
-                    // @ts-expect-error
-                    args.params.prompt = ProviderTransform.message(args.params.prompt, model.providerID, model.modelID)
-                  }
-                  return args.params
-                },
-              },
-            ],
+            middleware,
           }),
         }),
       )

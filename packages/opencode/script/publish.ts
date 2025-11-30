@@ -3,9 +3,16 @@ import { $ } from "bun"
 import pkg from "../package.json"
 import { Script } from "@opencode-ai/script"
 import { fileURLToPath } from "url"
+import path from "path"
 
 const dir = fileURLToPath(new URL("..", import.meta.url))
 process.chdir(dir)
+
+const distBase = "https://dist.kamiwaza.ai/opencode/releases"
+const bucket = "s3://opencode/opencode/releases"
+const distOnly = process.env["OPENCODE_S3_ONLY"] === "1"
+const packageArchives = distOnly || !Script.preview
+const publishRegistries = !Script.preview && !distOnly
 
 const { binaries } = await import("./build.ts")
 {
@@ -35,20 +42,22 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
     2,
   ),
 )
-for (const [name] of Object.entries(binaries)) {
-  try {
-    process.chdir(`./dist/${name}`)
-    if (process.platform !== "win32") {
-      await $`chmod 755 -R .`
+if (publishRegistries) {
+  for (const [name] of Object.entries(binaries)) {
+    try {
+      process.chdir(`./dist/${name}`)
+      if (process.platform !== "win32") {
+        await $`chmod -R 755 .`
+      }
+      await $`bun publish --access public --tag ${Script.channel}`
+    } finally {
+      process.chdir(dir)
     }
-    await $`bun publish --access public --tag ${Script.channel}`
-  } finally {
-    process.chdir(dir)
   }
+  await $`cd ./dist/${pkg.name} && bun publish --access public --tag ${Script.channel}`
 }
-await $`cd ./dist/${pkg.name} && bun publish --access public --tag ${Script.channel}`
 
-if (!Script.preview) {
+if (publishRegistries) {
   const major = Script.version.split(".")[0]
   const majorTag = `latest-${major}`
   for (const [name] of Object.entries(binaries)) {
@@ -57,7 +66,7 @@ if (!Script.preview) {
   await $`cd ./dist/${pkg.name} && npm dist-tag add ${pkg.name}-ai@${Script.version} ${majorTag}`
 }
 
-if (!Script.preview) {
+if (packageArchives) {
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
       await $`cd dist/${key}/bin && tar -czf ../../${key}.tar.gz *`
@@ -66,6 +75,25 @@ if (!Script.preview) {
     }
   }
 
+  const glob = new Bun.Glob("dist/opencode-*.*")
+  const files = await Array.fromAsync(glob.scan()).then((arr) =>
+    arr.filter((x) => x.endsWith(".zip") || x.endsWith(".tar.gz")),
+  )
+  const upload = async (file: string) => {
+    const name = path.basename(file)
+    await $`aws s3 cp ${file} ${bucket}/v${Script.version}/${name} --acl public-read`
+    await $`aws s3 cp ${file} ${bucket}/latest/${name} --acl public-read`
+  }
+  for (const file of files) {
+    await upload(file)
+  }
+  const versionPath = path.join("dist", "version.txt")
+  await Bun.file(versionPath).write(Script.version)
+  await $`aws s3 cp ${versionPath} ${bucket}/v${Script.version}/version --acl public-read`
+  await $`aws s3 cp ${versionPath} ${bucket}/latest/version --acl public-read`
+}
+
+if (publishRegistries) {
   // Calculate SHA values
   const arm64Sha = await $`sha256sum ./dist/opencode-linux-arm64.tar.gz | cut -d' ' -f1`.text().then((x) => x.trim())
   const x64Sha = await $`sha256sum ./dist/opencode-linux-x64.tar.gz | cut -d' ' -f1`.text().then((x) => x.trim())
@@ -73,6 +101,7 @@ if (!Script.preview) {
   const macArm64Sha = await $`sha256sum ./dist/opencode-darwin-arm64.zip | cut -d' ' -f1`.text().then((x) => x.trim())
 
   const [pkgver, _subver = ""] = Script.version.split(/(-.*)/, 2)
+  const releaseBase = `${distBase}/v${pkgver}${_subver}`
 
   // arch
   const binaryPkgbuild = [
@@ -92,10 +121,10 @@ if (!Script.preview) {
     "conflicts=('opencode')",
     "depends=('fzf' 'ripgrep')",
     "",
-    `source_aarch64=("\${pkgname}_\${pkgver}_aarch64.tar.gz::https://github.com/sst/opencode/releases/download/v\${pkgver}\${_subver}/opencode-linux-arm64.tar.gz")`,
+    `source_aarch64=("\${pkgname}_\${pkgver}_aarch64.tar.gz::${releaseBase}/opencode-linux-arm64.tar.gz")`,
     `sha256sums_aarch64=('${arm64Sha}')`,
 
-    `source_x86_64=("\${pkgname}_\${pkgver}_x86_64.tar.gz::https://github.com/sst/opencode/releases/download/v\${pkgver}\${_subver}/opencode-linux-x64.tar.gz")`,
+    `source_x86_64=("\${pkgname}_\${pkgver}_x86_64.tar.gz::${releaseBase}/opencode-linux-x64.tar.gz")`,
     `sha256sums_x86_64=('${x64Sha}')`,
     "",
     "package() {",
@@ -201,7 +230,7 @@ if (!Script.preview) {
     "",
     "  on_macos do",
     "    if Hardware::CPU.intel?",
-    `      url "https://github.com/sst/opencode/releases/download/v${Script.version}/opencode-darwin-x64.zip"`,
+    `      url "${distBase}/v${Script.version}/opencode-darwin-x64.zip"`,
     `      sha256 "${macX64Sha}"`,
     "",
     "      def install",
@@ -209,7 +238,7 @@ if (!Script.preview) {
     "      end",
     "    end",
     "    if Hardware::CPU.arm?",
-    `      url "https://github.com/sst/opencode/releases/download/v${Script.version}/opencode-darwin-arm64.zip"`,
+    `      url "${distBase}/v${Script.version}/opencode-darwin-arm64.zip"`,
     `      sha256 "${macArm64Sha}"`,
     "",
     "      def install",
@@ -220,14 +249,14 @@ if (!Script.preview) {
     "",
     "  on_linux do",
     "    if Hardware::CPU.intel? and Hardware::CPU.is_64_bit?",
-    `      url "https://github.com/sst/opencode/releases/download/v${Script.version}/opencode-linux-x64.tar.gz"`,
+    `      url "${distBase}/v${Script.version}/opencode-linux-x64.tar.gz"`,
     `      sha256 "${x64Sha}"`,
     "      def install",
     '        bin.install "opencode"',
     "      end",
     "    end",
     "    if Hardware::CPU.arm? and Hardware::CPU.is_64_bit?",
-    `      url "https://github.com/sst/opencode/releases/download/v${Script.version}/opencode-linux-arm64.tar.gz"`,
+    `      url "${distBase}/v${Script.version}/opencode-linux-arm64.tar.gz"`,
     `      sha256 "${arm64Sha}"`,
     "      def install",
     '        bin.install "opencode"',

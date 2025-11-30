@@ -48,12 +48,20 @@ const cli = yargs(hideBin(process.argv))
     describe: "print logs to stderr",
     type: "boolean",
   })
+  .option("no-stream", {
+    describe: "disable streaming responses from models",
+    type: "boolean",
+  })
   .option("log-level", {
     describe: "log level",
     type: "string",
     choices: ["DEBUG", "INFO", "WARN", "ERROR"],
   })
   .middleware(async (opts) => {
+    if (opts["no-stream"] === true) {
+      process.env["OPENCODE_STREAMING"] = "false"
+    }
+
     await Log.init({
       print: process.argv.includes("--print-logs"),
       dev: Installation.isLocal(),

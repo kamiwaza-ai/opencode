@@ -19,6 +19,15 @@ export namespace Flag {
   export const OPENCODE_EXPERIMENTAL_WATCHER = OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_WATCHER")
   export const OPENCODE_EXPERIMENTAL_EXA = OPENCODE_EXPERIMENTAL || truthy("OPENCODE_EXPERIMENTAL_EXA")
 
+  export function streamingEnabled() {
+    const raw = process.env["OPENCODE_STREAMING"]
+    if (!raw) return true
+    const lower = raw.toLowerCase()
+    if (lower === "false" || lower === "0") return false
+    if (lower === "true" || lower === "1") return true
+    return true
+  }
+
   function truthy(key: string) {
     const value = process.env[key]?.toLowerCase()
     return value === "true" || value === "1"

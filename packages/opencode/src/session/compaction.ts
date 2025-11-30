@@ -1,4 +1,4 @@
-import { streamText, wrapLanguageModel, type ModelMessage } from "ai"
+import { streamText, wrapLanguageModel, simulateStreamingMiddleware, type ModelMessage } from "ai"
 import { Session } from "."
 import { Identifier } from "../id/id"
 import { Instance } from "../project/instance"
@@ -129,6 +129,29 @@ export namespace SessionCompaction {
       model: model.info,
       abort: input.abort,
     })
+    const streaming = Flag.streamingEnabled()
+    const middleware = [
+      ...(streaming ? [] : [simulateStreamingMiddleware()]),
+      {
+        async transformParams(args) {
+          if (args.type === "stream") {
+            // @ts-expect-error
+            args.params.prompt = ProviderTransform.message(args.params.prompt, model.providerID, model.modelID)
+          }
+          return args.params
+        },
+      },
+    ]
+    const providerOptions = ProviderTransform.providerOptions(
+      model.npm,
+      model.providerID,
+      pipe(
+        {},
+        mergeDeep(ProviderTransform.options(model.providerID, model.modelID, model.npm ?? "", input.sessionID)),
+        mergeDeep(model.info.options),
+        (opts) => (streaming ? opts : { ...opts, stream: false }),
+      ),
+    )
     const result = await processor.process(() =>
       streamText({
         onError(error) {
@@ -138,15 +161,7 @@ export namespace SessionCompaction {
         },
         // set to 0, we handle loop
         maxRetries: 0,
-        providerOptions: ProviderTransform.providerOptions(
-          model.npm,
-          model.providerID,
-          pipe(
-            {},
-            mergeDeep(ProviderTransform.options(model.providerID, model.modelID, model.npm ?? "", input.sessionID)),
-            mergeDeep(model.info.options),
-          ),
-        ),
+        providerOptions,
         headers: model.info.headers,
         abortSignal: input.abort,
         tools: model.info.tool_call ? {} : undefined,
@@ -184,17 +199,7 @@ export namespace SessionCompaction {
         ],
         model: wrapLanguageModel({
           model: model.language,
-          middleware: [
-            {
-              async transformParams(args) {
-                if (args.type === "stream") {
-                  // @ts-expect-error
-                  args.params.prompt = ProviderTransform.message(args.params.prompt, model.providerID, model.modelID)
-                }
-                return args.params
-              },
-            },
-          ],
+          middleware,
         }),
       }),
     )
