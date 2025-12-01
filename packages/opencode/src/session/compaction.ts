@@ -133,12 +133,16 @@ export namespace SessionCompaction {
     const middleware = [
       ...(streaming ? [] : [simulateStreamingMiddleware()]),
       {
-        async transformParams(args) {
-          if (args.type === "stream") {
-            // @ts-expect-error
-            args.params.prompt = ProviderTransform.message(args.params.prompt, model.providerID, model.modelID)
+        async transformParams(args: Record<string, unknown>) {
+          const isStream = args["type"] === "stream"
+          const params = (args["params"] as Record<string, unknown> | undefined) ?? {}
+          if (isStream) {
+            const prompt = params["prompt"]
+            if (Array.isArray(prompt)) {
+              params["prompt"] = ProviderTransform.message(prompt, model.providerID, model.modelID)
+            }
           }
-          return args.params
+          return params
         },
       },
     ]
