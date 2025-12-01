@@ -50,6 +50,7 @@ import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { SessionStatus } from "./status"
 import { Flag } from "../flag/flag"
+import { StreamAdapters, KimiAdapter } from "./adapter"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -359,7 +360,7 @@ export namespace SessionPrompt {
               },
             },
           )
-          .catch(() => {})
+          .catch(() => { })
         assistantMessage.finish = "tool-calls"
         assistantMessage.time.completed = Date.now()
         await Session.updateMessage(assistantMessage)
@@ -504,7 +505,7 @@ export namespace SessionPrompt {
       const middleware = [
         ...(streaming ? [] : [simulateStreamingMiddleware()]),
         {
-          async transformParams(args: Record<string, unknown>) {
+          async transformParams(args: any) {
             const isStream = args["type"] === "stream"
             const params = (args["params"] as Record<string, unknown> | undefined) ?? {}
             if (isStream) {
@@ -513,7 +514,7 @@ export namespace SessionPrompt {
                 params["prompt"] = ProviderTransform.message(prompt, model.providerID, model.modelID)
               }
             }
-            return params
+            return params as any
           },
         },
       ]
@@ -530,8 +531,8 @@ export namespace SessionPrompt {
         })
       }
 
-      const result = await processor.process(() =>
-        streamText({
+      const result = await processor.process(() => {
+        const result = streamText({
           onError(error) {
             log.error("stream error", {
               error,
@@ -561,9 +562,9 @@ export namespace SessionPrompt {
           headers: {
             ...(model.providerID.startsWith("opencode")
               ? {
-                  "x-opencode-session": sessionID,
-                  "x-opencode-request": lastUser.id,
-                }
+                "x-opencode-session": sessionID,
+                "x-opencode-request": lastUser.id,
+              }
               : undefined),
             ...model.info.headers,
           },
@@ -609,8 +610,17 @@ export namespace SessionPrompt {
             model: model.language,
             middleware,
           }),
-        }),
-      )
+        })
+        if (!streaming) {
+          const adapters = [new KimiAdapter()]
+          const fullStream = StreamAdapters.apply(result.fullStream as any, adapters)
+          return {
+            ...result,
+            fullStream: fullStream as any,
+          }
+        }
+        return result
+      })
       if (result === "stop") break
       continue
     }
@@ -920,7 +930,7 @@ export namespace SessionPrompt {
                       agent: input.agent!,
                       messageID: info.id,
                       extra: { bypassCwdCheck: true, ...info.model },
-                      metadata: async () => {},
+                      metadata: async () => { },
                     })
                     pieces.push({
                       id: Identifier.ascending("part"),
@@ -980,7 +990,7 @@ export namespace SessionPrompt {
                     agent: input.agent!,
                     messageID: info.id,
                     extra: { bypassCwdCheck: true },
-                    metadata: async () => {},
+                    metadata: async () => { },
                   }),
                 )
                 return [
@@ -1382,14 +1392,14 @@ export namespace SessionPrompt {
     const parts =
       (agent.mode === "subagent" && command.subtask !== false) || command.subtask === true
         ? [
-            {
-              type: "subtask" as const,
-              agent: agent.name,
-              description: command.description ?? "",
-              // TODO: how can we make task tool accept a more complex input?
-              prompt: await resolvePromptParts(template).then((x) => x.find((y) => y.type === "text")?.text ?? ""),
-            },
-          ]
+          {
+            type: "subtask" as const,
+            agent: agent.name,
+            description: command.description ?? "",
+            // TODO: how can we make task tool accept a more complex input?
+            prompt: await resolvePromptParts(template).then((x) => x.find((y) => y.type === "text")?.text ?? ""),
+          },
+        ]
         : await resolvePromptParts(template)
 
     const result = (await prompt({
