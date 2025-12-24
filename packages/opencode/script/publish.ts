@@ -69,9 +69,9 @@ if (publishRegistries) {
 if (packageArchives) {
   for (const key of Object.keys(binaries)) {
     if (key.includes("linux")) {
-      await $`cd dist/${key}/bin && tar -czf ../../${key}.tar.gz *`
+      await $`tar -czf ../../${key}.tar.gz *`.cwd(`dist/${key}/bin`)
     } else {
-      await $`cd dist/${key}/bin && zip -r ../../${key}.zip *`
+      await $`zip -r ../../${key}.zip *`.cwd(`dist/${key}/bin`)
     }
   }
 
@@ -276,8 +276,8 @@ if (publishRegistries) {
   await $`cd ./dist/homebrew-tap && git push`
 
   const image = "ghcr.io/sst/opencode"
-  await $`docker build -t ${image}:${Script.version} .`
-  await $`docker push ${image}:${Script.version}`
-  await $`docker tag ${image}:${Script.version} ${image}:latest`
-  await $`docker push ${image}:latest`
+  const platforms = "linux/amd64,linux/arm64"
+  const tags = [`${image}:${Script.version}`, `${image}:latest`]
+  const tagFlags = tags.flatMap((tag) => ["-t", tag])
+  await $`docker buildx build --platform ${platforms} ${tagFlags} --push .`
 }
