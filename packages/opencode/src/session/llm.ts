@@ -1,6 +1,14 @@
 import { Provider } from "@/provider/provider"
 import { Log } from "@/util/log"
-import { streamText, wrapLanguageModel, type ModelMessage, type StreamTextResult, type Tool, type ToolSet } from "ai"
+import {
+  simulateStreamingMiddleware,
+  streamText,
+  wrapLanguageModel,
+  type ModelMessage,
+  type StreamTextResult,
+  type Tool,
+  type ToolSet,
+} from "ai"
 import { clone, mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
@@ -11,6 +19,7 @@ import { Plugin } from "@/plugin"
 import { SystemPrompt } from "./system"
 import { ToolRegistry } from "@/tool/registry"
 import { Flag } from "@/flag/flag"
+import { StreamAdapters, KimiAdapter, type StreamPart } from "./adapter"
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -104,16 +113,19 @@ export namespace LLM {
       params,
     })
 
+    const forceNonStreaming = ProviderTransform.forceNonStreaming(input.model)
+    const streaming = Flag.streamingEnabled() && !forceNonStreaming
+    const options = streaming ? params.options : { ...params.options, stream: false }
     const maxOutputTokens = ProviderTransform.maxOutputTokens(
       input.model.api.npm,
-      params.options,
+      options,
       input.model.limit.output,
       OUTPUT_TOKEN_MAX,
     )
 
     const tools = await resolveTools(input)
 
-    return streamText({
+    const result = streamText({
       onError(error) {
         l.error("stream error", {
           error,
@@ -143,7 +155,7 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+      providerOptions: ProviderTransform.providerOptions(input.model, options),
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       maxOutputTokens,
@@ -172,6 +184,7 @@ export namespace LLM {
       model: wrapLanguageModel({
         model: language,
         middleware: [
+          ...(streaming ? [] : [simulateStreamingMiddleware()]),
           {
             async transformParams(args) {
               if (args.type === "stream") {
@@ -185,6 +198,16 @@ export namespace LLM {
       }),
       experimental_telemetry: { isEnabled: cfg.experimental?.openTelemetry },
     })
+    if (streaming) return result
+    const adapters = [new KimiAdapter()]
+    const fullStream = StreamAdapters.apply(
+      result.fullStream as AsyncIterable<StreamPart>,
+      adapters,
+    ) as StreamTextResult<ToolSet, unknown>["fullStream"]
+    return {
+      ...result,
+      fullStream,
+    }
   }
 
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {

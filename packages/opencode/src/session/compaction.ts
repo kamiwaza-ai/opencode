@@ -1,4 +1,5 @@
-import { streamText, wrapLanguageModel, simulateStreamingMiddleware, type ModelMessage } from "ai"
+import { BusEvent } from "@/bus/bus-event"
+import { Bus } from "@/bus"
 import { Session } from "."
 import { Identifier } from "../id/id"
 import { Instance } from "../project/instance"
@@ -129,84 +130,49 @@ export namespace SessionCompaction {
       model,
       abort: input.abort,
     })
-    const streaming = Flag.streamingEnabled()
-    const middleware = [
-      ...(streaming ? [] : [simulateStreamingMiddleware()]),
-      {
-        async transformParams(args: Record<string, unknown>) {
-          const isStream = args["type"] === "stream"
-          const params = (args["params"] as Record<string, unknown> | undefined) ?? {}
-          if (isStream) {
-            const prompt = params["prompt"]
-            if (Array.isArray(prompt)) {
-              params["prompt"] = ProviderTransform.message(prompt, model.providerID, model.modelID)
+    const compacting = await Plugin.trigger(
+      "experimental.session.compacting",
+      { sessionID: input.sessionID },
+      { context: [], prompt: undefined },
+    )
+    const prompt =
+      "Provide a detailed but concise summary of our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next."
+    const text = compacting.prompt ?? [prompt, ...compacting.context].join("\n\n")
+    const result = await processor.process({
+      user: userMessage,
+      agent,
+      abort: input.abort,
+      sessionID: input.sessionID,
+      tools: {},
+      system: [],
+      messages: [
+        ...MessageV2.toModelMessage(
+          input.messages.filter((m) => {
+            if (m.info.role !== "assistant" || m.info.error === undefined) {
+              return true
             }
-          }
-          return params
-        },
-      },
-    ]
-    const providerOptions = ProviderTransform.providerOptions(
-      model.npm,
-      model.providerID,
-      pipe(
-        {},
-        mergeDeep(ProviderTransform.options(model.providerID, model.modelID, model.npm ?? "", input.sessionID)),
-        mergeDeep(model.info.options),
-        (opts) => (streaming ? opts : { ...opts, stream: false }),
-      ),
-    )
-    const result = await processor.process(() =>
-      streamText({
-        onError(error) {
-          log.error("stream error", {
-            error,
-          })
-        },
-        // set to 0, we handle loop
-        maxRetries: 0,
-        providerOptions,
-        headers: model.info.headers,
-        abortSignal: input.abort,
-        tools: model.info.tool_call ? {} : undefined,
-        messages: [
-          ...system.map(
-            (x): ModelMessage => ({
-              role: "system",
-              content: x,
-            }),
-          ),
-          ...MessageV2.toModelMessage(
-            input.messages.filter((m) => {
-              if (m.info.role !== "assistant" || m.info.error === undefined) {
-                return true
-              }
-              if (
-                MessageV2.AbortedError.isInstance(m.info.error) &&
-                m.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
-              ) {
-                return true
-              }
+            if (
+              MessageV2.AbortedError.isInstance(m.info.error) &&
+              m.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
+            ) {
+              return true
+            }
 
-              return false
-            }),
-          ),
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: "Provide a detailed but concise summary of our conversation above. Focus on information that would be helpful for continuing the conversation, including what we did, what we're doing, which files we're working on, and what we're going to do next.",
-              },
-            ],
-          },
-        ],
-        model: wrapLanguageModel({
-          model: model.language,
-          middleware,
-        }),
-      }),
-    )
+            return false
+          }),
+        ),
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text,
+            },
+          ],
+        },
+      ],
+      model,
+    })
     if (result === "continue") {
       const continueMsg = await Session.updateMessage({
         id: Identifier.ascending("message"),

@@ -241,6 +241,13 @@ export namespace ProviderTransform {
     return undefined
   }
 
+  export function forceNonStreaming(model: Provider.Model) {
+    const providerID = model.providerID.toLowerCase()
+    if (providerID.includes("minimax")) return true
+    const id = model.id.toLowerCase()
+    return id.includes("minimax-m2")
+  }
+
   export function options(
     model: Provider.Model,
     sessionID: string,

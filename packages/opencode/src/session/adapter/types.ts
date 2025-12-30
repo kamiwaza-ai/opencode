@@ -2,7 +2,7 @@ import { type StreamTextResult } from "ai"
 
 export type StreamPart =
     | { type: 'text-delta'; text: string }
-    | { type: 'tool-call'; toolCallId: string; toolName: string; args: any }
+    | { type: 'tool-call'; toolCallId: string; toolName: string; input: any }
     | { type: 'reasoning-start'; id?: string; providerMetadata?: any }
     | { type: 'reasoning-delta'; id?: string; text: string; providerMetadata?: any }
     | { type: 'reasoning-end'; id?: string; providerMetadata?: any }

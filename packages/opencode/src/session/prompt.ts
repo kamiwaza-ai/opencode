@@ -9,17 +9,7 @@ import { SessionRevert } from "./revert"
 import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
-import {
-  generateText,
-  streamText,
-  type ModelMessage,
-  type Tool as AITool,
-  tool,
-  wrapLanguageModel,
-  simulateStreamingMiddleware,
-  stepCountIs,
-  jsonSchema,
-} from "ai"
+import { type Tool as AITool, tool, jsonSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
@@ -38,7 +28,6 @@ import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
 import { ListTool } from "../tool/ls"
 import { FileTime } from "../file/time"
-import { Flag } from "../flag/flag"
 import { ulid } from "ulid"
 import { spawn } from "child_process"
 import { Command } from "../command"
@@ -51,7 +40,6 @@ import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { SessionStatus } from "./status"
 import { Flag } from "../flag/flag"
-import { StreamAdapters, KimiAdapter } from "./adapter"
 import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
@@ -527,51 +515,7 @@ export namespace SessionPrompt {
         tools: lastUser.tools,
         processor,
       })
-      const params = await Plugin.trigger(
-        "chat.params",
-        {
-          sessionID: sessionID,
-          agent: lastUser.agent,
-          model: model.info,
-          provider: await Provider.getProvider(model.providerID),
-          message: lastUser,
-        },
-        {
-          temperature: model.info.temperature
-            ? (agent.temperature ?? ProviderTransform.temperature(model.providerID, model.modelID))
-            : undefined,
-          topP: agent.topP ?? ProviderTransform.topP(model.providerID, model.modelID),
-          options: pipe(
-            {},
-            mergeDeep(ProviderTransform.options(model.providerID, model.modelID, model.npm ?? "", sessionID)),
-            mergeDeep(model.info.options),
-            mergeDeep(agent.options),
-          ),
-        },
-      )
-
-      const streaming = Flag.streamingEnabled()
-      const middleware = [
-        ...(streaming ? [] : [simulateStreamingMiddleware()]),
-        {
-          async transformParams(args: any) {
-            const isStream = args["type"] === "stream"
-            const params = (args["params"] as Record<string, unknown> | undefined) ?? {}
-            if (isStream) {
-              const prompt = params["prompt"]
-              if (Array.isArray(prompt)) {
-                params["prompt"] = ProviderTransform.message(prompt, model.providerID, model.modelID)
-              }
-            }
-            return params as any
-          },
-        },
-      ]
-      const providerOptions = ProviderTransform.providerOptions(
-        model.npm,
-        model.providerID,
-        streaming ? params.options : { ...params.options, stream: false },
-      )
+      const system = [...(await SystemPrompt.environment()), ...(await SystemPrompt.custom())]
 
       if (step === 1) {
         SessionSummary.summarize({
@@ -580,95 +524,42 @@ export namespace SessionPrompt {
         })
       }
 
-      const result = await processor.process(() => {
-        const result = streamText({
-          onError(error) {
-            log.error("stream error", {
-              error,
-            })
-          },
-          async experimental_repairToolCall(input) {
-            const lower = input.toolCall.toolName.toLowerCase()
-            if (lower !== input.toolCall.toolName && tools[lower]) {
-              log.info("repairing tool call", {
-                tool: input.toolCall.toolName,
-                repaired: lower,
-              })
-              return {
-                ...input.toolCall,
-                toolName: lower,
-              }
-            }
-            return {
-              ...input.toolCall,
-              input: JSON.stringify({
-                tool: input.toolCall.toolName,
-                error: input.error.message,
-              }),
-              toolName: "invalid",
-            }
-          },
-          headers: {
-            ...(model.providerID.startsWith("opencode")
-              ? {
-                "x-opencode-session": sessionID,
-                "x-opencode-request": lastUser.id,
-              }
-              : undefined),
-            ...model.info.headers,
-          },
-          // set to 0, we handle loop
-          maxRetries: 0,
-          activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
-          maxOutputTokens: ProviderTransform.maxOutputTokens(
-            model.providerID,
-            params.options,
-            model.info.limit.output,
-            OUTPUT_TOKEN_MAX,
-          ),
-          abortSignal: abort,
-          providerOptions,
-          stopWhen: stepCountIs(1),
-          temperature: params.temperature,
-          topP: params.topP,
-          messages: [
-            ...system.map(
-              (x): ModelMessage => ({
-                role: "system",
-                content: x,
-              }),
-            ),
-            ...MessageV2.toModelMessage(
-              msgs.filter((m) => {
-                if (m.info.role !== "assistant" || m.info.error === undefined) {
-                  return true
-                }
-                if (
-                  MessageV2.AbortedError.isInstance(m.info.error) &&
-                  m.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
-                ) {
-                  return true
-                }
+      const messages = clone(msgs)
+      await Plugin.trigger("experimental.chat.messages.transform", {}, { messages })
 
-                return false
-              }),
-            ),
-          ],
-          tools: model.info.tool_call === false ? undefined : tools,
-          model: wrapLanguageModel({
-            model: model.language,
-            middleware,
-          }),
-        })
-        if (!streaming) {
-          const adapters = [new KimiAdapter()]
-          const fullStream = StreamAdapters.apply(result.fullStream as any, adapters)
-          return {
-            ...result,
-            fullStream: fullStream as any,
-          }
-        }
-        return result
+      const result = await processor.process({
+        user: lastUser,
+        agent,
+        abort,
+        sessionID,
+        system,
+        messages: [
+          ...MessageV2.toModelMessage(
+            messages.filter((m) => {
+              if (m.info.role !== "assistant" || m.info.error === undefined) {
+                return true
+              }
+              if (
+                MessageV2.AbortedError.isInstance(m.info.error) &&
+                m.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
+              ) {
+                return true
+              }
+
+              return false
+            }),
+          ),
+          ...(isLastStep
+            ? [
+                {
+                  role: "assistant" as const,
+                  content: MAX_STEPS,
+                },
+              ]
+            : []),
+        ],
+        tools,
+        model,
       })
       if (result === "stop") break
       continue
