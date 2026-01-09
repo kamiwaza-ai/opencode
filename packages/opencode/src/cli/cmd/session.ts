@@ -8,28 +8,18 @@ import { EOL } from "os"
 
 export const SessionCommand = cmd({
   command: "session",
+  aliases: ["sessions"],
   describe: "manage sessions",
-  builder: (yargs: Argv) => yargs.command(SessionListCommand).demandCommand(),
-  async handler() {},
+  builder: (yargs: Argv) => addSessionListOptions(yargs).command(SessionListCommand),
+  handler: async (args) => {
+    await SessionListCommand.handler?.(args)
+  },
 })
 
 export const SessionListCommand = cmd({
   command: "list",
   describe: "list sessions",
-  builder: (yargs: Argv) => {
-    return yargs
-      .option("max-count", {
-        alias: "n",
-        describe: "limit to N most recent sessions",
-        type: "number",
-      })
-      .option("format", {
-        describe: "output format",
-        type: "string",
-        choices: ["table", "json"],
-        default: "table",
-      })
-  },
+  builder: (yargs: Argv) => addSessionListOptions(yargs),
   handler: async (args) => {
     await bootstrap(process.cwd(), async () => {
       const sessions = []
@@ -103,4 +93,19 @@ function formatSessionJSON(sessions: Session.Info[]): string {
     directory: session.directory,
   }))
   return JSON.stringify(jsonData, null, 2)
+}
+
+function addSessionListOptions(yargs: Argv) {
+  return yargs
+    .option("max-count", {
+      alias: "n",
+      describe: "limit to N most recent sessions",
+      type: "number",
+    })
+    .option("format", {
+      describe: "output format",
+      type: "string",
+      choices: ["table", "json"],
+      default: "table",
+    })
 }
