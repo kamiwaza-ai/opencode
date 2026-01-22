@@ -1,13 +1,15 @@
+import os from "os"
+import { Installation } from "@/installation"
 import { Provider } from "@/provider/provider"
 import { Log } from "@/util/log"
 import {
-  simulateStreamingMiddleware,
   streamText,
   wrapLanguageModel,
   type ModelMessage,
   type StreamTextResult,
   type Tool,
   type ToolSet,
+  extractReasoningMiddleware,
 } from "ai"
 import { clone, mergeDeep, pipe } from "remeda"
 import { ProviderTransform } from "@/provider/transform"
@@ -17,9 +19,9 @@ import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
 import { SystemPrompt } from "./system"
-import { ToolRegistry } from "@/tool/registry"
 import { Flag } from "@/flag/flag"
-import { StreamAdapters, KimiAdapter, type StreamPart } from "./adapter"
+import { PermissionNext } from "@/permission/next"
+import { Auth } from "@/auth"
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -53,13 +55,20 @@ export namespace LLM {
       modelID: input.model.id,
       providerID: input.model.providerID,
     })
-    const [language, cfg] = await Promise.all([Provider.getLanguage(input.model), Config.get()])
+    const [language, cfg, provider, auth] = await Promise.all([
+      Provider.getLanguage(input.model),
+      Config.get(),
+      Provider.getProvider(input.model.providerID),
+      Auth.get(input.model.providerID),
+    ])
+    const isCodex = provider.id === "openai" && auth?.type === "oauth"
 
     const system = SystemPrompt.header(input.model.providerID)
     system.push(
       [
         // use agent prompt otherwise provider prompt
-        ...(input.agent.prompt ? [input.agent.prompt] : SystemPrompt.provider(input.model)),
+        // For Codex sessions, skip SystemPrompt.provider() since it's sent via options.instructions
+        ...(input.agent.prompt ? [input.agent.prompt] : isCodex ? [] : SystemPrompt.provider(input.model)),
         // any custom prompt passed into this call
         ...input.system,
         // any custom prompt from last user message
@@ -71,7 +80,7 @@ export namespace LLM {
 
     const header = system[0]
     const original = clone(system)
-    await Plugin.trigger("experimental.chat.system.transform", {}, { system })
+    await Plugin.trigger("experimental.chat.system.transform", { sessionID: input.sessionID }, { system })
     if (system.length === 0) {
       system.push(...original)
     }
@@ -82,7 +91,21 @@ export namespace LLM {
       system.push(header, rest.join("\n"))
     }
 
-    const provider = await Provider.getProvider(input.model.providerID)
+    const variant =
+      !input.small && input.model.variants && input.user.variant ? input.model.variants[input.user.variant] : {}
+    const base = input.small
+      ? ProviderTransform.smallOptions(input.model)
+      : ProviderTransform.options(input.model, input.sessionID, provider.options)
+    const options: Record<string, any> = pipe(
+      base,
+      mergeDeep(input.model.options),
+      mergeDeep(input.agent.options),
+      mergeDeep(variant),
+    )
+    if (isCodex) {
+      options.instructions = SystemPrompt.instructions()
+      options.store = false
+    }
 
     const params = await Plugin.trigger(
       "chat.params",
@@ -90,7 +113,7 @@ export namespace LLM {
         sessionID: input.sessionID,
         agent: input.agent,
         model: input.model,
-        provider: Provider.getProvider(input.model.providerID),
+        provider,
         message: input.user,
       },
       {
@@ -99,33 +122,22 @@ export namespace LLM {
           : undefined,
         topP: input.agent.topP ?? ProviderTransform.topP(input.model),
         topK: ProviderTransform.topK(input.model),
-        options: pipe(
-          {},
-          mergeDeep(ProviderTransform.options(input.model, input.sessionID, provider.options)),
-          input.small ? mergeDeep(ProviderTransform.smallOptions(input.model)) : mergeDeep({}),
-          mergeDeep(input.model.options),
-          mergeDeep(input.agent.options),
-        ),
+        options,
       },
     )
 
-    l.info("params", {
-      params,
-    })
-
-    const forceNonStreaming = ProviderTransform.forceNonStreaming(input.model)
-    const streaming = Flag.streamingEnabled() && !forceNonStreaming
-    const options = streaming ? params.options : { ...params.options, stream: false }
-    const maxOutputTokens = ProviderTransform.maxOutputTokens(
-      input.model.api.npm,
-      options,
-      input.model.limit.output,
-      OUTPUT_TOKEN_MAX,
-    )
+    const maxOutputTokens = isCodex
+      ? undefined
+      : ProviderTransform.maxOutputTokens(
+          input.model.api.npm,
+          params.options,
+          input.model.limit.output,
+          OUTPUT_TOKEN_MAX,
+        )
 
     const tools = await resolveTools(input)
 
-    const result = streamText({
+    return streamText({
       onError(error) {
         l.error("stream error", {
           error,
@@ -155,12 +167,19 @@ export namespace LLM {
       temperature: params.temperature,
       topP: params.topP,
       topK: params.topK,
-      providerOptions: ProviderTransform.providerOptions(input.model, options),
+      providerOptions: ProviderTransform.providerOptions(input.model, params.options),
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
       maxOutputTokens,
       abortSignal: input.abort,
       headers: {
+        ...(isCodex
+          ? {
+              originator: "opencode",
+              "User-Agent": `opencode/${Installation.VERSION} (${os.platform()} ${os.release()}; ${os.arch()})`,
+              session_id: input.sessionID,
+            }
+          : undefined),
         ...(input.model.providerID.startsWith("opencode")
           ? {
               "x-opencode-project": Instance.project.id,
@@ -173,18 +192,24 @@ export namespace LLM {
       },
       maxRetries: input.retries ?? 0,
       messages: [
-        ...system.map(
-          (x): ModelMessage => ({
-            role: "system",
-            content: x,
-          }),
-        ),
+        ...(isCodex
+          ? [
+              {
+                role: "user",
+                content: system.join("\n\n"),
+              } as ModelMessage,
+            ]
+          : system.map(
+              (x): ModelMessage => ({
+                role: "system",
+                content: x,
+              }),
+            )),
         ...input.messages,
       ],
       model: wrapLanguageModel({
         model: language,
         middleware: [
-          ...(streaming ? [] : [simulateStreamingMiddleware()]),
           {
             async transformParams(args) {
               if (args.type === "stream") {
@@ -194,30 +219,19 @@ export namespace LLM {
               return args.params
             },
           },
+          extractReasoningMiddleware({ tagName: "think", startWithReasoning: false }),
         ],
       }),
       experimental_telemetry: { isEnabled: cfg.experimental?.openTelemetry },
     })
-    if (streaming) return result
-    const adapters = [new KimiAdapter()]
-    const fullStream = StreamAdapters.apply(
-      result.fullStream as AsyncIterable<StreamPart>,
-      adapters,
-    ) as StreamTextResult<ToolSet, unknown>["fullStream"]
-    return {
-      ...result,
-      fullStream,
-    }
   }
 
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
-    const enabled = pipe(
-      input.agent.tools,
-      mergeDeep(await ToolRegistry.enabled(input.agent)),
-      mergeDeep(input.user.tools ?? {}),
-    )
-    for (const [key, value] of Object.entries(enabled)) {
-      if (value === false) delete input.tools[key]
+    const disabled = PermissionNext.disabled(Object.keys(input.tools), input.agent.permission)
+    for (const tool of Object.keys(input.tools)) {
+      if (input.user.tools?.[tool] === false || disabled.has(tool)) {
+        delete input.tools[tool]
+      }
     }
     return input.tools
   }

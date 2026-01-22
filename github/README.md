@@ -81,13 +81,14 @@ This will walk you through installing the GitHub app, creating the workflow, and
        permissions:
          id-token: write
        steps:
-         - name: Checkout repository
-           uses: actions/checkout@v4
-           with:
-             fetch-depth: 1
+          - name: Checkout repository
+            uses: actions/checkout@v6
+            with:
+              fetch-depth: 1
+              persist-credentials: false
 
-         - name: Run opencode
-           uses: sst/opencode/github@latest
+          - name: Run opencode
+           uses: anomalyco/opencode/github@latest
            env:
              ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
            with:
@@ -98,7 +99,7 @@ This will walk you through installing the GitHub app, creating the workflow, and
 
 ## Support
 
-This is an early release. If you encounter issues or have feedback, please create an issue at https://github.com/sst/opencode/issues.
+This is an early release. If you encounter issues or have feedback, please create an issue at https://github.com/anomalyco/opencode/issues.
 
 ## Development
 
