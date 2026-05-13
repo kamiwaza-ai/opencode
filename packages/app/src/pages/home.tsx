@@ -3,7 +3,7 @@ import { Button } from "@opencode-ai/ui/button"
 import { Logo } from "@opencode-ai/ui/logo"
 import { useLayout } from "@/context/layout"
 import { useNavigate } from "@solidjs/router"
-import { base64Encode } from "@opencode-ai/util/encode"
+import { base64Encode } from "@opencode-ai/core/util/encode"
 import { Icon } from "@opencode-ai/ui/icon"
 import { usePlatform } from "@/context/platform"
 import { DateTime } from "luxon"
@@ -28,6 +28,13 @@ export default function Home() {
       .slice()
       .sort((a, b) => (b.time.updated ?? b.time.created) - (a.time.updated ?? a.time.created))
       .slice(0, 5)
+  })
+
+  const serverDotClass = createMemo(() => {
+    const healthy = server.healthy()
+    if (healthy === true) return "bg-icon-success-base"
+    if (healthy === false) return "bg-icon-critical-base"
+    return "bg-border-weak-base"
   })
 
   function openProject(directory: string) {
@@ -73,9 +80,7 @@ export default function Home() {
         <div
           classList={{
             "size-2 rounded-full": true,
-            "bg-icon-success-base": server.healthy() === true,
-            "bg-icon-critical-base": server.healthy() === false,
-            "bg-border-weak-base": server.healthy() === undefined,
+            [serverDotClass()]: true,
           }}
         />
         {server.name}
@@ -108,6 +113,14 @@ export default function Home() {
             </ul>
           </div>
         </Match>
+        <Match when={!sync.ready}>
+          <div class="mt-30 mx-auto flex flex-col items-center gap-3">
+            <div class="text-12-regular text-text-weak">{language.t("common.loading")}</div>
+            <Button class="px-3" onClick={chooseProject}>
+              {language.t("command.project.open")}
+            </Button>
+          </div>
+        </Match>
         <Match when={true}>
           <div class="mt-30 mx-auto flex flex-col items-center gap-3">
             <Icon name="folder-add-left" size="large" />
@@ -115,8 +128,7 @@ export default function Home() {
               <div class="text-14-medium text-text-strong">{language.t("home.empty.title")}</div>
               <div class="text-12-regular text-text-weak">{language.t("home.empty.description")}</div>
             </div>
-            <div />
-            <Button class="px-3" onClick={chooseProject}>
+            <Button class="px-3 mt-1" onClick={chooseProject}>
               {language.t("command.project.open")}
             </Button>
           </div>
