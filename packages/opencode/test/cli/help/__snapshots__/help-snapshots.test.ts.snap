@@ -370,7 +370,7 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 manage sessions
 
 Commands:
-  opencode session list                list sessions
+  opencode session list                list sessions                                       [default]
   opencode session delete <sessionID>  delete a session
 
 Options:
@@ -587,15 +587,14 @@ exports[`opencode CLI help-text snapshots every documented command emits stable 
 list sessions
 
 Options:
-  -h, --help           show help                                                           [boolean]
-  -v, --version        show version number                                                 [boolean]
-      --print-logs     print logs to stderr                                                [boolean]
-      --no-stream      disable streaming responses from models                             [boolean]
-      --log-level      log level                [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure           run without external plugins                                        [boolean]
-  -n, -n, --max-count  limit to N most recent sessions                                      [number]
-      --format         output format
-                             [string] [choices: "table", "json", "table", "json"] [default: "table"]"
+  -h, --help        show help                                                              [boolean]
+  -v, --version     show version number                                                    [boolean]
+      --print-logs  print logs to stderr                                                   [boolean]
+      --no-stream   disable streaming responses from models                                [boolean]
+      --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure        run without external plugins                                           [boolean]
+  -n, --max-count   limit to N most recent sessions                                         [number]
+      --format      output format             [string] [choices: "table", "json"] [default: "table"]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode session delete --help 1`] = `
@@ -612,9 +611,7 @@ Options:
       --print-logs  print logs to stderr                                                   [boolean]
       --no-stream   disable streaming responses from models                                [boolean]
       --log-level   log level                   [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
-      --pure        run without external plugins                                           [boolean]
-  -n, --max-count   limit to N most recent sessions                                         [number]
-      --format      output format             [string] [choices: "table", "json"] [default: "table"]"
+      --pure        run without external plugins                                           [boolean]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode github install --help 1`] = `

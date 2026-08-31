@@ -96,10 +96,10 @@ export class KimiAdapter implements Adapter {
     }
 
     // 1. Handle Reasoning
-    const thinkEndIndex = currentText.indexOf("</think>")
-    if (thinkEndIndex !== -1) {
-      let reasoningContent = currentText.slice(0, thinkEndIndex)
-      reasoningContent = reasoningContent.replace(/^\s*<think>/, "")
+    const thinkStart = currentText.match(/^\s*<think>/)
+    const thinkEndIndex = thinkStart ? currentText.indexOf("</think>", thinkStart[0].length) : -1
+    if (thinkStart && thinkEndIndex !== -1) {
+      const reasoningContent = currentText.slice(thinkStart[0].length, thinkEndIndex)
 
       if (emitReasoning) {
         const reasoningId = `reasoning-${this.reasoningCounter++}`
@@ -112,16 +112,17 @@ export class KimiAdapter implements Adapter {
     }
 
     // 2. Handle Tool Calls
+    let parsedMarker = false
     while (true) {
       const callBegin = currentText.indexOf("<|tool_call_begin|>")
       if (callBegin === -1) {
-        let remaining = currentText
-          .replace(/<\|tool_calls_section_begin\|>/g, "")
-          .replace(/<\|tool_calls_section_end\|>/g, "")
-
-        const extracted = this.extractJsonToolCalls(remaining)
-        if (extracted.text) {
-          pushText(extracted.text)
+        const extracted = this.extractJsonToolCalls(currentText)
+        const remaining =
+          parsedMarker || extracted.toolCalls.length
+            ? extracted.text.replace(/<\|tool_calls_section_begin\|>/g, "").replace(/<\|tool_calls_section_end\|>/g, "")
+            : currentText
+        if (remaining) {
+          pushText(remaining)
         }
         if (emitToolCalls) {
           for (const toolCall of extracted.toolCalls) {
@@ -131,20 +132,11 @@ export class KimiAdapter implements Adapter {
         break
       }
 
-      const preText = currentText.slice(0, callBegin)
-      let cleanPreText = preText
-        .replace(/<\|tool_calls_section_begin\|>/g, "")
-        .replace(/<\|tool_calls_section_end\|>/g, "")
-
-      if (cleanPreText) {
-        pushText(cleanPreText)
-      }
-
       const rest = currentText.slice(callBegin + "<|tool_call_begin|>".length)
 
       const argBegin = rest.indexOf("<|tool_call_argument_begin|>")
       if (argBegin === -1) {
-        pushText("<|tool_call_begin|>" + rest)
+        pushText(currentText)
         break
       }
 
@@ -152,9 +144,15 @@ export class KimiAdapter implements Adapter {
       const rest2 = rest.slice(argBegin + "<|tool_call_argument_begin|>".length)
       const callEnd = rest2.indexOf("<|tool_call_end|>")
       if (callEnd === -1) {
-        pushText("<|tool_call_begin|>" + rest)
+        pushText(currentText)
         break
       }
+
+      const preText = currentText.slice(0, callBegin)
+      const cleanPreText = preText
+        .replace(/<\|tool_calls_section_begin\|>/g, "")
+        .replace(/<\|tool_calls_section_end\|>/g, "")
+      if (cleanPreText) pushText(cleanPreText)
 
       const argsJson = rest2.slice(0, callEnd).trim()
 
@@ -178,6 +176,7 @@ export class KimiAdapter implements Adapter {
         })
       }
 
+      parsedMarker = true
       currentText = rest2.slice(callEnd + "<|tool_call_end|>".length)
     }
 

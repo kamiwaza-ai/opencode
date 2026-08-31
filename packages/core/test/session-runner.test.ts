@@ -703,13 +703,6 @@ describe("SessionRunnerLLM", () => {
         timestamp: DateTime.makeUnsafe(1),
         location: Location.Ref.make({ directory: AbsolutePath.make("/moved") }),
       })
-      expect(
-        yield* db
-          .select()
-          .from(SessionContextEpochTable)
-          .where(eq(SessionContextEpochTable.session_id, sessionID))
-          .get(),
-      ).toBeUndefined()
 
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Second" }), resume: false })
       const exit = yield* session.resume(sessionID).pipe(Effect.exit)
@@ -1097,7 +1090,7 @@ describe("SessionRunnerLLM", () => {
       currentModel = compactModel
       requests.length = 0
       responses = [
-        fragmentFixture("text", "text-summary", ["## Goal\n- Preserve the task"]).completeEvents,
+        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
         fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
       ]
       yield* session.prompt({
@@ -1108,22 +1101,32 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(2)
-      expect(userTexts(requests[0])[0]).toContain("## Goal")
+      expect(requests.map((request) => request.http?.headers)).toEqual([
+        {
+          "x-session-affinity": sessionID,
+          "X-Session-Id": sessionID,
+        },
+        {
+          "x-session-affinity": sessionID,
+          "X-Session-Id": sessionID,
+        },
+      ])
+      expect(userTexts(requests[0])[0]).toContain("## Objective")
       expect(userTexts(requests[1])).toHaveLength(1)
-      expect(userTexts(requests[1])[0]).toContain("<summary>\n## Goal\n- Preserve the task\n</summary>")
+      expect(userTexts(requests[1])[0]).toContain("<summary>\n## Objective\n- Preserve the task\n</summary>")
       expect(userTexts(requests[1])[0]).toContain(`[User]: ${"Recent exact request ".repeat(180)}`)
 
       const context = yield* (yield* SessionStore.Service).context(sessionID)
       expect(context.map((message) => message.type)).toEqual(["compaction", "assistant"])
       expect(context[0]).toMatchObject({
         type: "compaction",
-        summary: "## Goal\n- Preserve the task",
+        summary: "## Objective\n- Preserve the task",
       })
 
       requests.length = 0
       executions.length = 0
       responses = [
-        fragmentFixture("text", "text-summary-2", ["## Goal\n- Preserve the updated task"]).completeEvents,
+        fragmentFixture("text", "text-summary-2", ["## Objective\n- Preserve the updated task"]).completeEvents,
         fragmentFixture("text", "text-final-2", ["Continued again"]).completeEvents,
       ]
       yield* session.prompt({
@@ -1135,13 +1138,74 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(2)
       expect(userTexts(requests[0])[0]).toContain(
-        "<previous-summary>\n## Goal\n- Preserve the task\n</previous-summary>",
+        "<prior-summary>\n## Objective\n- Preserve the task\n</prior-summary>",
       )
       expect(userTexts(requests[0])[0]).toContain("Recent exact request")
       expect((yield* (yield* SessionStore.Service).context(sessionID))[0]).toMatchObject({
         type: "compaction",
-        summary: "## Goal\n- Preserve the updated task",
+        summary: "## Objective\n- Preserve the updated task",
       })
+    }),
+  )
+
+  it.effect("retains only complete serialized messages during compaction", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const earlier = `EARLIER_BOUNDARY ${"a".repeat(3_000)} EARLIER_END`
+      const recent = `RECENT_BOUNDARY ${"b".repeat(3_000)} RECENT_END`
+      response = fragmentFixture("text", "text-earlier", ["Earlier answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: earlier }), resume: false })
+      yield* session.resume(sessionID)
+
+      currentModel = compactModel
+      requests.length = 0
+      responses = [
+        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
+        fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
+      ]
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: recent }), resume: false })
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      const summary = userTexts(requests[0])[0]
+      const continuation = userTexts(requests[1])[0]
+      expect(summary.match(/EARLIER_BOUNDARY/g)).toHaveLength(1)
+      expect(summary).toContain(`EARLIER_BOUNDARY ${"a".repeat(3_000)} EARLIER_END`)
+      expect(summary).not.toContain("RECENT_BOUNDARY")
+      expect(continuation).not.toContain("EARLIER_BOUNDARY")
+      expect(continuation).not.toContain("EARLIER_END")
+      expect(continuation).toContain("<recent-context>\n[Assistant]: Earlier answer")
+      expect(continuation).toContain(`RECENT_BOUNDARY ${"b".repeat(3_000)} RECENT_END`)
+    }),
+  )
+
+  it.effect("summarizes an oversized newest message without retaining a fragment", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      response = fragmentFixture("text", "text-earlier", ["Earlier answer"]).completeEvents
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Earlier question" }), resume: false })
+      yield* session.resume(sessionID)
+
+      const oversized = `OVERSIZED_BOUNDARY ${"x".repeat(4_500)} OVERSIZED_END`
+      currentModel = compactModel
+      requests.length = 0
+      responses = [
+        fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
+        fragmentFixture("text", "text-final", ["Continued"]).completeEvents,
+      ]
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: oversized }), resume: false })
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      const summary = userTexts(requests[0])[0]
+      const continuation = userTexts(requests[1])[0]
+      expect(summary.match(/OVERSIZED_BOUNDARY/g)).toHaveLength(1)
+      expect(summary).toContain(oversized)
+      expect(continuation).not.toContain("OVERSIZED_BOUNDARY")
+      expect(continuation).not.toContain("OVERSIZED_END")
+      expect(continuation).toContain("<recent-context>\n\n</recent-context>")
     }),
   )
 
@@ -1153,17 +1217,17 @@ describe("SessionRunnerLLM", () => {
           LLMEvent.stepStart({ index: 0 }),
           LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" }),
         ],
-        fragmentFixture("text", "text-summary", ["## Goal\n- Recover overflow"]).completeEvents,
+        fragmentFixture("text", "text-summary", ["## Objective\n- Recover overflow"]).completeEvents,
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(3)
-      expect(userTexts(requests[1])[0]).toContain("## Goal")
-      expect(userTexts(requests[2])[0]).toContain("<summary>\n## Goal\n- Recover overflow\n</summary>")
+      expect(userTexts(requests[1])[0]).toContain("## Objective")
+      expect(userTexts(requests[2])[0]).toContain("<summary>\n## Objective\n- Recover overflow\n</summary>")
       expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction", summary: "## Goal\n- Recover overflow" },
+        { type: "compaction", summary: "## Objective\n- Recover overflow" },
         { type: "assistant", finish: "stop" },
       ])
       yield* replaySessionProjection(sessionID)
@@ -1183,7 +1247,7 @@ describe("SessionRunnerLLM", () => {
       ]
       responses = [
         overflow(),
-        fragmentFixture("text", "text-summary", ["## Goal\n- Recover once"]).completeEvents,
+        fragmentFixture("text", "text-summary", ["## Objective\n- Recover once"]).completeEvents,
         overflow(),
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
@@ -1211,7 +1275,7 @@ describe("SessionRunnerLLM", () => {
         }),
       )
       responses = [
-        fragmentFixture("text", "text-summary", ["## Goal\n- Recover raw overflow"]).completeEvents,
+        fragmentFixture("text", "text-summary", ["## Objective\n- Recover raw overflow"]).completeEvents,
         fragmentFixture("text", "text-final", ["Recovered"]).completeEvents,
       ]
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Continue" }), resume: false })
@@ -1219,7 +1283,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(3)
       expect(yield* session.context(sessionID)).toMatchObject([
-        { type: "compaction", summary: "## Goal\n- Recover raw overflow" },
+        { type: "compaction", summary: "## Objective\n- Recover raw overflow" },
         { type: "assistant", finish: "stop" },
       ])
     }),
@@ -1250,7 +1314,7 @@ describe("SessionRunnerLLM", () => {
       const session = yield* setupOverflowRecovery
       responses = [
         [LLMEvent.providerError({ message: "prompt too long", classification: "context-overflow" })],
-        fragmentFixture("text", "text-summary", ["## Goal\n- Interrupted"]).completeEvents,
+        fragmentFixture("text", "text-summary", ["## Objective\n- Interrupted"]).completeEvents,
       ]
       const firstGate = yield* Deferred.make<void>()
       const summaryGate = yield* Deferred.make<void>()
@@ -2454,6 +2518,43 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("adds session correlation headers to model requests", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Run correlated request" }), resume: false })
+
+      requests.length = 0
+      yield* session.resume(sessionID)
+
+      expect(requests[0]?.http?.headers).toEqual({
+        "x-session-affinity": sessionID,
+        "X-Session-Id": sessionID,
+      })
+    }),
+  )
+
+  it.effect("adds the parent session header to child model requests", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const parentID = SessionV2.ID.make("ses_runner_parent")
+      const { db } = yield* Database.Service
+      yield* db
+        .update(SessionTable)
+        .set({ parent_id: parentID })
+        .where(eq(SessionTable.id, sessionID))
+        .run()
+        .pipe(Effect.orDie)
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Run child request" }), resume: false })
+
+      requests.length = 0
+      yield* session.resume(sessionID)
+
+      expect(requests[0]?.http?.headers?.["x-parent-session-id"]).toBe(parentID)
+    }),
+  )
+
   it.effect("bounds 64-character session prompt cache keys", () =>
     Effect.gen(function* () {
       yield* setup
@@ -2605,6 +2706,148 @@ describe("SessionRunnerLLM", () => {
           ],
         },
         { type: "assistant", finish: "stop", content: [{ type: "text", text: "Recovered" }] },
+      ])
+    }),
+  )
+
+  it.effect("returns policy-blocked tools to the model and continues", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const registry = yield* ToolRegistry.Service
+      yield* registry.register({
+        blocked: Tool.make({
+          description: "Fail because policy blocked execution",
+          input: Schema.Struct({}),
+          output: Schema.Struct({}),
+          execute: () =>
+            Effect.fail(new PermissionV2.BlockedError({ rules: [] })).pipe(
+              Effect.mapError(() => new Tool.Failure({ message: "Permission blocked" })),
+            ),
+        }),
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Call blocked" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "call-blocked", name: "blocked", input: {} }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Call blocked" },
+        {
+          type: "assistant",
+          content: [
+            { type: "tool", id: "call-blocked", state: { status: "error", error: { message: "Permission blocked" } } },
+          ],
+        },
+        { type: "assistant", finish: "stop" },
+      ])
+    }),
+  )
+
+  it.effect("interrupts runner continuation when permission approval is declined", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const registry = yield* ToolRegistry.Service
+      yield* registry.register({
+        declined: Tool.make({
+          description: "Fail because the user declined approval",
+          input: Schema.Struct({}),
+          output: Schema.Struct({}),
+          execute: () => Effect.die(new PermissionV2.DeclinedError()),
+        }),
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Call declined" }), resume: false })
+
+      requests.length = 0
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.toolCall({ id: "call-declined", name: "declined", input: {} }),
+        LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+        LLMEvent.finish({ reason: "tool-calls" }),
+      ]
+
+      const exit = yield* session.resume(sessionID).pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure") expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      expect(requests).toHaveLength(1)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Call declined" },
+        {
+          type: "assistant",
+          content: [
+            {
+              type: "tool",
+              id: "call-declined",
+              state: { status: "error", error: { message: "Tool execution interrupted" } },
+            },
+          ],
+        },
+      ])
+    }),
+  )
+
+  it.effect("returns permission corrections to the model and continues", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const registry = yield* ToolRegistry.Service
+      yield* registry.register({
+        corrected: Tool.make({
+          description: "Fail with user correction feedback",
+          input: Schema.Struct({}),
+          output: Schema.Struct({}),
+          execute: () =>
+            Effect.fail(new PermissionV2.CorrectedError({ feedback: "Use another tool" })).pipe(
+              Effect.mapError(() => new Tool.Failure({ message: "Use another tool" })),
+            ),
+        }),
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Call corrected" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "call-corrected", name: "corrected", input: {} }),
+          LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+          LLMEvent.finish({ reason: "tool-calls" }),
+        ],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(2)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Call corrected" },
+        {
+          type: "assistant",
+          content: [
+            { type: "tool", id: "call-corrected", state: { status: "error", error: { message: "Use another tool" } } },
+          ],
+        },
+        { type: "assistant", finish: "stop" },
       ])
     }),
   )

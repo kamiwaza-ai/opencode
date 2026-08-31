@@ -99,6 +99,20 @@ describe("RuntimeFlags", () => {
     }),
   )
 
+  it.effect("enables streaming by default and disables it only for false or zero", () =>
+    Effect.gen(function* () {
+      const defaultFlags = yield* readFlags.pipe(Effect.provide(fromConfig({})))
+      const falseFlags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_STREAMING: "FALSE" })))
+      const zeroFlags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_STREAMING: "0" })))
+      const trueFlags = yield* readFlags.pipe(Effect.provide(fromConfig({ OPENCODE_STREAMING: "true" })))
+
+      expect(defaultFlags.streaming).toBe(true)
+      expect(falseFlags.streaming).toBe(false)
+      expect(zeroFlags.streaming).toBe(false)
+      expect(trueFlags.streaming).toBe(true)
+    }),
+  )
+
   it.effect("layer accepts partial test overrides and fills defaults from Config definitions", () =>
     Effect.gen(function* () {
       const flags = yield* readFlags.pipe(

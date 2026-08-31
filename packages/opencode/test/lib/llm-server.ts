@@ -430,6 +430,83 @@ function send(item: Sse) {
   return HttpServerResponse.stream(Stream.concat(body, end), { contentType: "text/event-stream" })
 }
 
+function sendChatCompletion(item: Sse, model: string) {
+  if (item.wait || item.hang || item.error || item.reset) {
+    return HttpServerResponse.jsonUnsafe(
+      { error: { message: "non-stream test responses do not support delayed or failing replies" } },
+      { status: 500 },
+    )
+  }
+
+  let content = ""
+  let reasoning = ""
+  let finishReason = "stop"
+  let usage: ReturnType<typeof tokens>
+  const toolCalls = new Map<number, { id: string; name: string; arguments: string }>()
+
+  for (const value of [...item.head, ...item.tail]) {
+    if (!value || typeof value !== "object") continue
+    const line = value as {
+      choices?: Array<{
+        delta?: {
+          content?: string
+          reasoning_content?: string
+          tool_calls?: Array<{
+            index?: number
+            id?: string
+            function?: { name?: string; arguments?: string }
+          }>
+        }
+        finish_reason?: string
+      }>
+      usage?: ReturnType<typeof tokens>
+    }
+    const choice = line.choices?.[0]
+    if (!choice) continue
+    if (typeof choice.delta?.content === "string") content += choice.delta.content
+    if (typeof choice.delta?.reasoning_content === "string") reasoning += choice.delta.reasoning_content
+    if (choice.finish_reason) finishReason = choice.finish_reason
+    if (line.usage) usage = line.usage
+
+    for (const call of choice.delta?.tool_calls ?? []) {
+      const index = call.index ?? 0
+      const current = toolCalls.get(index) ?? { id: call.id ?? `call_${index}`, name: "", arguments: "" }
+      if (call.id) current.id = call.id
+      if (call.function?.name) current.name += call.function.name
+      if (call.function?.arguments) current.arguments += call.function.arguments
+      toolCalls.set(index, current)
+    }
+  }
+
+  const calls = [...toolCalls.entries()].map(([index, call]) => ({
+    index,
+    id: call.id,
+    type: "function" as const,
+    function: { name: call.name, arguments: call.arguments },
+  }))
+
+  return HttpServerResponse.jsonUnsafe({
+    id: "chatcmpl-test",
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          content: content || null,
+          ...(reasoning ? { reasoning_content: reasoning } : {}),
+          ...(calls.length ? { tool_calls: calls } : {}),
+        },
+        finish_reason: finishReason,
+        logprobs: null,
+      },
+    ],
+    ...(usage ? { usage } : {}),
+  })
+}
+
 const reset = Effect.fn("TestLLMServer.reset")(function* (item: Sse) {
   const req = yield* HttpServerRequest.HttpServerRequest
   const res = NodeHttpServerRequest.toServerResponse(req)
@@ -678,6 +755,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           yield* notify()
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
+          if (current.body.stream !== true) return sendChatCompletion(auto, modelFrom(body))
           return send(auto)
         }
         const next = pull(current)
@@ -686,12 +764,14 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           yield* notify()
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("ok"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
+          if (current.body.stream !== true) return sendChatCompletion(auto, modelFrom(body))
           return send(auto)
         }
         hits = [...hits, current]
         yield* notify()
         if (next.type !== "sse") return fail(next)
         if (mode === "responses") return send(responses(next, modelFrom(body)))
+        if (current.body.stream !== true) return sendChatCompletion(next, modelFrom(body))
         if (next.reset) {
           yield* reset(next)
           return HttpServerResponse.empty()

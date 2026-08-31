@@ -87,6 +87,26 @@ describe("opencode read-only commands (smoke)", () => {
     60_000,
   )
 
+  cliIt.live(
+    "session aliases keep list options scoped away from delete",
+    ({ opencode }) =>
+      Effect.gen(function* () {
+        for (const argv of [
+          ["session", "--format", "json", "--max-count", "1"],
+          ["sessions", "--format", "json", "--max-count", "1"],
+          ["session", "list", "--format", "json", "--max-count", "1"],
+        ]) {
+          opencode.expectExit(yield* opencode.spawn(argv), 0, argv.join(" "))
+        }
+
+        const invalid = yield* opencode.spawn(["session", "delete", "ses_test", "--format", "json"])
+        expect(invalid.exitCode).not.toBe(0)
+        expect(invalid.stderr).not.toContain("--format")
+        expect(invalid.stderr).not.toContain("--max-count")
+      }),
+    60_000,
+  )
+
   // `stats` aggregates token usage from the session DB. Empty DB → all zeros.
   cliIt.live(
     "stats: exits 0",

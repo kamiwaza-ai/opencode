@@ -54,6 +54,10 @@ const cli = yargs(args)
     describe: "print logs to stderr",
     type: "boolean",
   })
+  .option("stream", {
+    type: "boolean",
+    hidden: true,
+  })
   .option("no-stream", {
     describe: "disable streaming responses from models",
     type: "boolean",
@@ -68,7 +72,11 @@ const cli = yargs(args)
     type: "boolean",
   })
   .middleware(async (opts) => {
-    if (opts["no-stream"] === true) process.env.OPENCODE_STREAMING = "false"
+    // yargs treats `--no-stream` as boolean negation and exposes it as
+    // `stream: false`; retain the literal key for `--no-stream=true`.
+    if ((opts as typeof opts & { stream?: boolean }).stream === false || opts["no-stream"] === true) {
+      process.env.OPENCODE_STREAMING = "false"
+    }
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     if (opts.pure) {

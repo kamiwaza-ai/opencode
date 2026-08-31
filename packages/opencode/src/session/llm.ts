@@ -13,7 +13,6 @@ import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
 import { Config } from "@/config/config"
-import { Flag } from "@opencode-ai/core/flag/flag"
 import type { Agent } from "@/agent/agent"
 import type { MessageV2 } from "./message-v2"
 import { Plugin } from "@/plugin"
@@ -224,7 +223,7 @@ const live: Layer.Layer<
           })
         : undefined
 
-      const streaming = Flag.streamingEnabled()
+      const streaming = flags.streaming
 
       // Runtime seam: native is an opt-in adapter over @opencode-ai/llm. It
       // either returns a ready LLMEvent stream or a concrete fallback reason.
@@ -319,10 +318,7 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          providerOptions: ProviderTransform.providerOptions(
-            input.model,
-            streaming ? prepared.params.options : { ...prepared.params.options, stream: false },
-          ),
+          providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
           activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
           tools: prepared.tools,
           toolChoice: input.toolChoice,
@@ -380,12 +376,11 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            const fullStream = result.streaming
-              ? result.result.fullStream
-              : (adapt(result.result.fullStream, [new KimiAdapter()]) as AISDKResult["fullStream"])
-            return Stream.fromAsyncIterable(fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
+            const fullStream =
+              result.streaming || !ProviderTransform.isKimiFamily(input.model)
+                ? result.result.fullStream
+                : (adapt(result.result.fullStream, [new KimiAdapter()]) as AISDKResult["fullStream"])
+            return Stream.fromAsyncIterable(fullStream, (e) => (e instanceof Error ? e : new Error(String(e)))).pipe(
               Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
               Stream.flatMap((events) => Stream.fromIterable(events)),
             )

@@ -1,5 +1,6 @@
 import type { Argv } from "yargs"
 import { Effect } from "effect"
+import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Session } from "@/session/session"
 import { SessionID } from "../../session/schema"
@@ -71,12 +72,12 @@ const list = Effect.fn("Cli.session.list")(function* (args: { maxCount?: number;
   })
 })
 
-export const SessionCommand = effectCmd({
+export const SessionCommand = cmd({
   command: "session",
   aliases: ["sessions"],
   describe: "manage sessions",
-  builder: (yargs: Argv) => addSessionListOptions(yargs.command(SessionListCommand).command(SessionDeleteCommand)),
-  handler: list,
+  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionDeleteCommand).demandCommand(),
+  async handler() {},
 })
 
 export const SessionDeleteCommand = effectCmd({
@@ -100,6 +101,7 @@ export const SessionDeleteCommand = effectCmd({
 
 export const SessionListCommand = effectCmd({
   command: "list",
+  aliases: ["$0"],
   describe: "list sessions",
   builder: (yargs: Argv) => addSessionListOptions(yargs),
   handler: list,

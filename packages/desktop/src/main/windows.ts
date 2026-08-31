@@ -4,14 +4,18 @@ import type { DesktopTheme } from "@opencode-ai/ui/theme/types"
 import oc2ThemeJson from "../../../ui/src/theme/themes/oc-2.json"
 import { randomUUID } from "node:crypto"
 import { rmSync } from "node:fs"
-import { app, BrowserWindow, dialog, net, nativeImage, nativeTheme, protocol } from "electron"
+import { app, BrowserWindow, dialog, net, nativeImage, nativeTheme, protocol, shell } from "electron"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import type { TitlebarTheme } from "../preload/types"
 import { exportDebugLogs, write as writeLog } from "./logging"
-import { getStore } from "./store"
+import { getStore, removeStoreFile } from "./store"
 import { PINCH_ZOOM_ENABLED_KEY, WINDOW_IDS_KEY } from "./store-keys"
 import { createUnresponsiveSampler } from "./unresponsive"
+import { nativeT } from "./native-translations"
+import { createWindowRegistry } from "./window-registry"
+import { safeWindowURL } from "./window-state"
+import { resolveExternalURL, resolveLocalFilePath } from "./external-url"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const rendererRoot = join(root, "../renderer")
@@ -35,21 +39,28 @@ protocol.registerSchemesAsPrivileged([
       secure: true,
       standard: true,
       supportFetchAPI: true,
+      stream: true,
     },
   },
 ])
 
 let backgroundColor: string | undefined
 let relaunchHandler = () => {
+  setAppQuitting()
   app.relaunch()
   app.exit(0)
 }
-let appQuitting = false
-let lastFocusedWindowID: string | undefined
 const titlebarThemes = new WeakMap<BrowserWindow, Partial<TitlebarTheme>>()
 const pinchZoomEnabled = new WeakMap<BrowserWindow, boolean>()
 const windowIDs = new WeakMap<BrowserWindow, string>()
-const windowsByID = new Map<string, BrowserWindow>()
+const registry = createWindowRegistry<BrowserWindow>({
+  read: () => getStore().get(WINDOW_IDS_KEY),
+  write: (ids) => getStore().set(WINDOW_IDS_KEY, ids),
+  cleanup: (id) => {
+    rmSync(join(app.getPath("userData"), windowStateFile(id)), { force: true })
+    removeStoreFile(windowDataFile(id))
+  },
+})
 const titlebarHeight = 40
 const maxZoomLevel = 10
 const minZoomLevel = 0.2
@@ -58,13 +69,16 @@ export function setRelaunchHandler(handler: () => void) {
   relaunchHandler = handler
 }
 
-export function setAppQuitting() {
-  appQuitting = true
+export function setAppQuitting(quitting = true) {
+  registry.setQuitting(quitting)
 }
 
 export function setBackgroundColor(color: string) {
   backgroundColor = color
-  BrowserWindow.getAllWindows().forEach((win) => win.setBackgroundColor(color))
+  BrowserWindow.getAllWindows().forEach((win) => {
+    win.setBackgroundColor(color)
+    if (process.platform === "darwin") win.invalidateShadow()
+  })
 }
 
 export function getBackgroundColor(): string | undefined {
@@ -99,6 +113,13 @@ function overlay(theme: Partial<TitlebarTheme> = {}, zoom = 1) {
 
 export function setTitlebar(win: BrowserWindow, theme: Partial<TitlebarTheme> = {}) {
   titlebarThemes.set(win, theme)
+  // macOS draws the window frame hairline and shadow using the NSWindow
+  // appearance, which follows nativeTheme rather than the rendered content.
+  // Align it with the app theme so a light app on a dark system does not get
+  // the dark-appearance border and shadow. A "system" scheme must map to
+  // "system" (not the resolved mode) or prefers-color-scheme stops tracking
+  // OS appearance changes in the renderer.
+  if (process.platform === "darwin") nativeTheme.themeSource = theme.scheme ?? theme.mode ?? "system"
   updateTitlebar(win)
 }
 
@@ -128,14 +149,13 @@ export function getWindowID(win: BrowserWindow) {
 export function getLastFocusedWindow() {
   const focused = BrowserWindow.getFocusedWindow()
   if (focused) return focused
-  if (!lastFocusedWindowID) return null
-  const win = windowsByID.get(lastFocusedWindowID)
+  const win = registry.lastFocused()
   if (!win || win.isDestroyed()) return null
   return win
 }
 
 export function restoreMainWindows() {
-  const ids = readWindowIDs()
+  const ids = registry.persisted()
   return (ids.length ? ids : [randomUUID()]).map((id) => createMainWindow(id))
 }
 
@@ -166,7 +186,7 @@ export function createMainWindow(id: string = randomUUID()) {
     ...(process.platform === "darwin"
       ? {
           titleBarStyle: "hidden" as const,
-          trafficLightPosition: { x: 12, y: 14 },
+          trafficLightPosition: { x: 14, y: 14 },
         }
       : {}),
     ...(process.platform === "win32"
@@ -186,6 +206,7 @@ export function createMainWindow(id: string = randomUUID()) {
 
   allowRendererPermissions(win)
   wireWindowRecovery(win, id)
+  wireNavigationPolicy(win)
 
   win.webContents.session.webRequest.onBeforeSendHeaders((details, callback) => {
     const { requestHeaders } = details
@@ -201,6 +222,7 @@ export function createMainWindow(id: string = randomUUID()) {
 
   state.manage(win)
   registerWindow(win, id)
+  wireFullscreen(win)
   loadWindow(win, "index.html")
   wireZoom(win)
 
@@ -211,44 +233,59 @@ export function createMainWindow(id: string = randomUUID()) {
   return win
 }
 
+export function openExternalURL(value: string) {
+  const url = resolveExternalURL(value)
+  if (!url) {
+    writeLog("window", "blocked external target", { url: value }, "warn")
+    return
+  }
+  void shell.openExternal(url)
+}
+
+export function openLocalFileURL(value: string) {
+  const path = resolveLocalFilePath(value)
+  if (!path) {
+    writeLog("window", "blocked local file target", { url: value }, "warn")
+    return
+  }
+  void shell.openPath(path).then((error) => {
+    if (error) writeLog("window", "failed to open local file", { path, error }, "error")
+  })
+}
+
+function wireNavigationPolicy(win: BrowserWindow) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isRendererUrl(url)) openExternalURL(url)
+    return { action: "deny" }
+  })
+  // Renderer reloads (window.location.reload) navigate to the app's own URL
+  // and must stay in-window; everything else leaves through the OS.
+  win.webContents.on("will-navigate", (event, url) => {
+    if (isRendererUrl(url)) return
+    event.preventDefault()
+    openExternalURL(url)
+  })
+}
+
 function registerWindow(win: BrowserWindow, id: string) {
   windowIDs.set(win, id)
-  windowsByID.set(id, win)
-  persistWindowID(id)
+  registry.register(id, win)
 
-  win.on("focus", () => {
-    lastFocusedWindowID = id
-  })
-  win.on("closed", () => {
-    windowsByID.delete(id)
-    if (lastFocusedWindowID === id) lastFocusedWindowID = windowsByID.keys().next().value
-    if (!appQuitting) removeWindowID(id)
-  })
-}
-
-function readWindowIDs() {
-  const value = getStore().get(WINDOW_IDS_KEY)
-  if (!Array.isArray(value)) return []
-  return value.filter((id): id is string => typeof id === "string" && id.length > 0)
-}
-
-function writeWindowIDs(ids: string[]) {
-  getStore().set(WINDOW_IDS_KEY, [...new Set(ids)])
-}
-
-function persistWindowID(id: string) {
-  const ids = readWindowIDs()
-  if (ids.includes(id)) return
-  writeWindowIDs([...ids, id])
-}
-
-function removeWindowID(id: string) {
-  writeWindowIDs(readWindowIDs().filter((item) => item !== id))
-  rmSync(join(app.getPath("userData"), windowStateFile(id)), { force: true })
+  win.on("focus", () => registry.focused(id))
+  // Windows never emits before-quit on OS shutdown/logoff, but each window
+  // gets session-end before it closes; flag the quit so ids stay persisted.
+  win.on("session-end", () => registry.setQuitting())
+  win.on("closed", () => registry.closed(id))
 }
 
 function windowStateFile(id: string) {
   return `window-state-${id.replace(/[^a-zA-Z0-9._-]/g, "-")}.json`
+}
+
+// Mirrors windowStorage() in packages/app/src/utils/persist.ts, which names
+// the per-window renderer store this window persists its tabs into.
+function windowDataFile(id: string) {
+  return `opencode.window.${id.replace(/[^a-zA-Z0-9._-]/g, "-")}.dat`
 }
 
 export function registerRendererProtocol() {
@@ -269,7 +306,10 @@ export function registerRendererProtocol() {
     }
 
     try {
-      const response = await net.fetch(pathToFileURL(file).toString())
+      const range = request.headers.get("range")
+      const response = await net.fetch(pathToFileURL(file).toString(), {
+        headers: range ? { range } : undefined,
+      })
       if (response.status >= 400) {
         writeLog(
           "protocol",
@@ -306,19 +346,20 @@ function wireWindowRecovery(win: BrowserWindow, name: string) {
   let showing = false
   const sampler = createUnresponsiveSampler(win, name)
 
-  const handle = async (button: string | undefined, wait: boolean) => {
-    if (button === "Export Logs") {
+  type RecoveryAction = "relaunch" | "export-logs" | "keep-waiting" | "quit"
+  const handle = async (action: RecoveryAction | undefined, wait: boolean) => {
+    if (action === "export-logs") {
       const sampling = sampler.stopAndFlush()
       await exportDebugLogs().catch((error) => writeLog("main", "failed to export debug logs", { error }, "error"))
       if (wait && sampling) sampler.start()
       return true
     }
-    if (button === "Relaunch") {
+    if (action === "relaunch") {
       sampler.stopAndFlush()
       relaunchHandler()
       return false
     }
-    if (button === "Quit") {
+    if (action === "quit") {
       sampler.stopAndFlush()
       app.quit()
     }
@@ -330,16 +371,26 @@ function wireWindowRecovery(win: BrowserWindow, name: string) {
     showing = true
     try {
       while (!win.isDestroyed()) {
-        const buttons = wait ? ["Relaunch", "Export Logs", "Keep Waiting"] : ["Relaunch", "Export Logs", "Quit"]
+        const actions: { id: RecoveryAction; label: string }[] = wait
+          ? [
+              { id: "relaunch", label: nativeT("desktop.recovery.action.relaunch") },
+              { id: "export-logs", label: nativeT("desktop.recovery.action.exportLogs") },
+              { id: "keep-waiting", label: nativeT("desktop.recovery.action.keepWaiting") },
+            ]
+          : [
+              { id: "relaunch", label: nativeT("desktop.recovery.action.relaunch") },
+              { id: "export-logs", label: nativeT("desktop.recovery.action.exportLogs") },
+              { id: "quit", label: nativeT("desktop.recovery.action.quit") },
+            ]
         const result = await dialog.showMessageBox(win, {
           type: "warning",
-          buttons,
+          buttons: actions.map((action) => action.label),
           defaultId: 0,
           cancelId: 2,
           message,
           detail,
         })
-        if (await handle(buttons[result.response], wait)) continue
+        if (await handle(actions[result.response]?.id, wait)) continue
         return
       }
     } finally {
@@ -363,7 +414,7 @@ function wireWindowRecovery(win: BrowserWindow, name: string) {
         errorCode,
         errorDescription,
         validatedURL,
-        currentURL: win.webContents.getURL(),
+        currentURL: safeWindowURL(win),
         isMainFrame,
       },
       "error",
@@ -371,8 +422,13 @@ function wireWindowRecovery(win: BrowserWindow, name: string) {
 
     if (!isMainFrame || errorCode === -3) return
     void show(
-      "OpenCode failed to load",
-      [`Window: ${name}`, `URL: ${validatedURL}`, `Error: ${errorCode} ${errorDescription}`].join("\n"),
+      nativeT("desktop.recovery.loadFailed"),
+      nativeT("desktop.recovery.loadFailed.detail", {
+        window: name,
+        url: validatedURL,
+        code: errorCode,
+        description: errorDescription,
+      }),
       false,
     )
   }
@@ -385,25 +441,24 @@ function wireWindowRecovery(win: BrowserWindow, name: string) {
   })
   win.webContents.on("render-process-gone", (_event, details) => {
     sampler.stopAndFlush()
-    writeLog(
-      "window",
-      "renderer process gone",
-      { window: name, currentURL: win.webContents.getURL(), details },
-      "error",
-    )
+    writeLog("window", "renderer process gone", { window: name, currentURL: safeWindowURL(win), details }, "error")
     void show(
-      "OpenCode window terminated unexpectedly",
-      [`Window: ${name}`, `Reason: ${details.reason}`, `Code: ${details.exitCode ?? "<unknown>"}`].join("\n"),
+      nativeT("desktop.recovery.terminated"),
+      nativeT("desktop.recovery.terminated.detail", {
+        window: name,
+        reason: details.reason,
+        code: details.exitCode ?? nativeT("desktop.recovery.unknown"),
+      }),
       false,
     )
   })
   win.on("unresponsive", () => {
-    writeLog("window", "renderer unresponsive", { window: name, currentURL: win.webContents.getURL() }, "error")
+    writeLog("window", "renderer unresponsive", { window: name, currentURL: safeWindowURL(win) }, "error")
     sampler.start()
-    void show("OpenCode is not responding", "You can relaunch the app, open the logs, or keep waiting.", true)
+    void show(nativeT("desktop.recovery.unresponsive"), nativeT("desktop.recovery.unresponsive.detail"), true)
   })
   win.on("responsive", () => {
-    writeLog("window", "renderer responsive", { window: name, currentURL: win.webContents.getURL() }, "error")
+    writeLog("window", "renderer responsive", { window: name, currentURL: safeWindowURL(win) }, "error")
     sampler.stopAndFlush()
   })
   win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
@@ -473,6 +528,16 @@ function wireZoom(win: BrowserWindow) {
     if (win.webContents.getZoomFactor() !== 1) win.webContents.setZoomFactor(1)
     updateZoom(win)
   })
+}
+
+function wireFullscreen(win: BrowserWindow) {
+  const send = (fullscreen: boolean) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return
+    win.webContents.send("window-fullscreen-changed", fullscreen)
+  }
+
+  win.on("enter-full-screen", () => send(true))
+  win.on("leave-full-screen", () => send(false))
 }
 
 function clampZoom(value: number) {

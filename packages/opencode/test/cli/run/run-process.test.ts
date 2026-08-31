@@ -24,6 +24,22 @@ describe("opencode run (non-interactive subprocess)", () => {
   )
 
   cliIt.concurrent(
+    "--no-stream uses a non-stream provider request without changing CLI output",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        const output = "<think>literal markup</think>generated without SSE"
+        yield* llm.text(output)
+        const result = yield* opencode.run("say hi", { noStream: true })
+
+        opencode.expectExit(result, 0)
+        expect(result.stdout).toBe(output + "\n")
+        const inputs = yield* llm.inputs
+        expect(inputs.some((input) => input.stream !== true)).toBe(true)
+      }),
+    60_000,
+  )
+
+  cliIt.concurrent(
     "prints each completed text part in order around a tool continuation",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
@@ -82,10 +98,10 @@ describe("opencode run (non-interactive subprocess)", () => {
   )
 
   // The test provider's SSE error item is interpreted by the SDK as an unknown
-  // finish, not a fatal provider/session error. Lock that distinction in so it
-  // is not accidentally used as the failure compatibility oracle.
+  // finish, not a fatal provider/session error. Unknown finishes should continue
+  // the prompt loop so a subsequent response can complete the run.
   cliIt.concurrent(
-    "unknown stream finish preserves partial output and exits 0",
+    "unknown stream finish preserves partial output and continues",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
         yield* llm.push(
@@ -95,9 +111,10 @@ describe("opencode run (non-interactive subprocess)", () => {
           }),
         )
         yield* llm.fail("upstream provider exploded mid-stream")
+        yield* llm.text("recovered")
         const result = yield* opencode.run("trigger midstream error", { timeoutMs: 30_000 })
         expect(result.exitCode).toBe(0)
-        expect(result.stdout).toBe("partial response\n")
+        expect(result.stdout).toBe("partial response\nrecovered\n")
         expect(result.stderr).not.toContain("upstream provider exploded mid-stream")
       }),
     60_000,
@@ -213,7 +230,7 @@ describe("opencode run (non-interactive subprocess)", () => {
   )
 
   cliIt.concurrent(
-    "--format json records partial output for an unknown stream finish",
+    "--format json records an unknown stream finish and continuation",
     ({ llm, opencode }) =>
       Effect.gen(function* () {
         yield* llm.push(
@@ -223,6 +240,7 @@ describe("opencode run (non-interactive subprocess)", () => {
           }),
         )
         yield* llm.fail("provider failed")
+        yield* llm.text("recovered")
         const result = yield* opencode.run("fail after output", { format: "json" })
 
         const events = opencode.parseJsonEvents(result.stdout)
@@ -234,9 +252,14 @@ describe("opencode run (non-interactive subprocess)", () => {
           "step_finish",
           "step_start",
           "step_finish",
+          "step_start",
+          "text",
+          "step_finish",
         ])
         expect(events[1]?.part).toEqual(expect.objectContaining({ type: "text", text: "partial json" }))
-        expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))
+        expect(events[5]?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "unknown" }))
+        expect(events[7]?.part).toEqual(expect.objectContaining({ type: "text", text: "recovered" }))
+        expect(events.at(-1)?.part).toEqual(expect.objectContaining({ type: "step-finish", reason: "stop" }))
       }),
     60_000,
   )
